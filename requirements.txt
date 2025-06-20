@@ -1,0 +1,26 @@
+# Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
+
+# IMPORTANTE: Este requirements.txt é compatível com Apache Airflow 2.8+ / 3.x
+# As DAGs foram atualizadas para usar schedule= ao invés de schedule_interval=
+# e EmptyOperator ao invés de DummyOperator
+
+# Essential data manipulation libraries
+pandas
+numpy
+requests
+faker
+
+# Airflow providers for various integrations
+apache-airflow-providers-http
+apache-airflow-providers-postgres
+apache-airflow-providers-amazon
+apache-airflow-providers-microsoft-azure
+apache-airflow-providers-ftp
+
+# Astro Python SDK for data operations
+astro-sdk-python
+
+# Additional utilities
+openpyxl
+beautifulsoup4
+pendulum
