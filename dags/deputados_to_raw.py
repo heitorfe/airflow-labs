@@ -36,7 +36,7 @@ default_args = {
     dag_id='01_deputados_para_s3_blob',
     default_args=default_args,
     description='Carrega dados de deputados da API da Câmara e salva no S3',
-    schedule='@daily',
+    schedule='@monthly',  # Executa mensalmente
     catchup=False,
     tags=['api', 's3', 'deputies', 'full-load'],
 )
@@ -84,7 +84,7 @@ def deputados_etl():
         
         print(f"Transformados {len(transformed_deputies)} registros")
         return transformed_deputies
-    
+
     @task(outlets=[deputies_dataset])
     def load_to_s3(deputies_data: list) -> str:
         """
@@ -103,7 +103,7 @@ def deputados_etl():
         
         # Define bucket e chave
         bucket_name = 'airflow-my-lab'
-        file_key = f"raw/deputies/deputies_{pendulum.now().strftime('%Y%m%d_%H%M%S')}.json"
+        file_key = f"raw/deputies/deputies_{pendulum.now().strftime('%Y%m%d')}.json"
         
         try:
             # Converte dados para JSON
@@ -124,6 +124,8 @@ def deputados_etl():
         except Exception as e:
             raise Exception(f"Erro ao carregar dados para o S3: {str(e)}")
         
+    
+    
     # Task dependencies
     raw_data = extract_deputies_data()
     transformed_data = transform_deputies_data(raw_data)
