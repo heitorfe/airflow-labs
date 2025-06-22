@@ -95,7 +95,7 @@ def detalhes_deputados_etl():
         )
 
         bucket_name = "airflow-my-lab"
-        file_key = f"raw/deputies/deputies_details_{pendulum.now().format('YYYYMMDD_HHmmss')}.json"
+        file_key = f"raw/deputies/deputies_details_{pendulum.now().format('YYYYMMDD')}.json"
         json_data = json.dumps(deputy_details, ensure_ascii=False, indent=2)
 
         s3_client.put_object(
