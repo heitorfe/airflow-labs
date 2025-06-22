@@ -7,6 +7,9 @@ from airflow.decorators import dag, task
 from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 from airflow import Dataset
+from airflow.providers.amazon.aws.transfers.http_to_s3 import HttpToS3Operator
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
+from airflow.providers.http.hooks.http import HttpHook
 import pendulum
 import boto3
 import requests
@@ -16,6 +19,7 @@ import logging
 
 # Variáveis
 API_BASE_URL = Variable.get("camara_api_base_url", "https://dadosabertos.camara.leg.br/api/v2")
+BUKET_NAME = "airflow-my-lab"
 
 # Datasets
 expenses_dataset_full = Dataset("s3://camara/raw/expenses/full/")
@@ -46,35 +50,27 @@ def despesas_full_etl():
     @task
     def get_deputy_list() -> List[Dict]:
         """Obtém lista atual de deputados"""
-        aws_conn = BaseHook.get_connection('aws_s3_demo')
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=aws_conn.login,
-            aws_secret_access_key=aws_conn.password,
-            region_name=aws_conn.extra_dejson.get('region_name', 'us-east-1')
+        http_hook = HttpHook(
+            http_conn_id='http_dadosabertos_camara',
+            method='GET')
+        
+        endpoint = "/deputados"
+
+        response = http_hook.run(
+            endpoint=endpoint,
+            headers={'Content-Type': 'application/json'}
         )
+        if response.status_code != 200:
+            raise Exception(f"Erro ao buscar lista de deputados: {response.text}")
         
-        # Pega o arquivo mais recente de deputados
-        bucket_name = 'airflow-my-lab'
-        response = s3_client.list_objects_v2(
-            Bucket=bucket_name, 
-            Prefix='raw/deputies/deputies_'
-        )
-        
-        if not response.get('Contents'):
-            # Fallback para API se não houver arquivo
-            url = f"{API_BASE_URL}/deputados"
-            resp = requests.get(url)
-            resp.raise_for_status()
-            return resp.json().get('dados', [])
-        
-        # Pega o arquivo mais recente
-        latest_file = sorted(response['Contents'], key=lambda x: x['LastModified'])[-1]
-        obj = s3_client.get_object(Bucket=bucket_name, Key=latest_file['Key'])
-        return json.loads(obj['Body'].read().decode('utf-8'))
+        data = response.json()
+        deputies = data.get('dados', [])
+        logging.info(f"Total de deputados encontrados: {len(deputies)}")
+
+        return [deputy['id'] for deputy in deputies]
 
     @task
-    def extract_expenses_batch(deputies: List[Dict], **context) -> Dict[str, Any]:
+    def extract_expenses_batch(deputies: List[str], **context) -> Dict[str, Any]:
         """Extrai despesas em lotes para otimizar performance"""
         params = context['params']
         ano = params.get('ano', pendulum.now().year)
@@ -85,8 +81,7 @@ def despesas_full_etl():
         
         logging.info(f"Processando despesas para {ano}/{mes:02d}")
         
-        for i, deputy in enumerate(deputies):
-            deputy_id = deputy['id']
+        for i, deputy_id in enumerate(deputies):
             try:
                 url = f"{API_BASE_URL}/deputados/{deputy_id}/despesas"
                 params = {
@@ -112,10 +107,7 @@ def despesas_full_etl():
                     # Adiciona metadados
                     for expense in expenses:
                         expense['deputy_id'] = deputy_id
-                        expense['deputy_name'] = deputy.get('nome')
-                        expense['extracted_at'] = pendulum.now().isoformat()
-                        expense['ano_referencia'] = ano
-                        expense['mes_referencia'] = mes
+                        expense['extracted_at'] = pendulum.now('America/Sao_Paulo').isoformat()
                     
                     deputy_expenses.extend(expenses)
                     
@@ -135,6 +127,10 @@ def despesas_full_etl():
                 logging.error(f"Erro ao processar deputado {deputy_id}: {str(e)}")
                 failed_deputies.append({'id': deputy_id, 'error': str(e)})
                 continue
+
+            finally:
+                if len(failed_deputies) >= 10:  # Limite de 10.000 despesas por execução
+                    raise Exception("Too much errors occurred during the extraction process. ")
         
         result = {
             'expenses': all_expenses,
@@ -152,50 +148,31 @@ def despesas_full_etl():
     @task(outlets=[expenses_dataset_full])
     def load_expenses_to_s3(extraction_result: Dict[str, Any]) -> str:
         """Salva despesas no S3 com particionamento por ano/mês"""
-        aws_conn = BaseHook.get_connection('aws_s3_demo')
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=aws_conn.login,
-            aws_secret_access_key=aws_conn.password,
-            region_name=aws_conn.extra_dejson.get('region_name', 'us-east-1')
-        )
+        s3_hook = S3Hook(aws_conn_id='aws_s3_demo')
         
         bucket_name = 'airflow-my-lab'
         ano = extraction_result['ano']
         mes = extraction_result['mes']
-        timestamp = pendulum.now().strftime('%Y%m%d')
+        # timestamp = pendulum.now().strftime('%Y%m%d')
         
         # Particionamento por ano/mês
-        file_key = f"raw/expenses/full/year={ano}/month={mes:02d}/expenses_full_{timestamp}.json"
+        file_key = f"raw/expenses/full/year={ano}/month={mes:02d}/expenses.json"
         
         # Dados para salvar
         data_to_save = {
-            'metadata': {
-                'ano': ano,
-                'mes': mes,
-                'total_expenses': extraction_result['total_expenses'],
-                'total_deputies_processed': extraction_result['total_deputies_processed'],
-                'failed_deputies_count': len(extraction_result['failed_deputies']),
-                'extraction_timestamp': extraction_result['extraction_timestamp']
-            },
             'expenses': extraction_result['expenses'],
             'failed_deputies': extraction_result['failed_deputies']
         }
         
         json_data = json.dumps(data_to_save, ensure_ascii=False, indent=2)
         
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=file_key,
-            Body=json_data.encode('utf-8'),
-            ContentType='application/json',
-            Metadata={
-                'ano': str(ano),
-                'mes': str(mes),
-                'total_expenses': str(extraction_result['total_expenses']),
-                'extraction_type': 'full'
-            }
+        s3_hook.load_string(
+            string_data=json_data,
+            key=file_key,
+            bucket_name=bucket_name,
+            replace=True
         )
+
         
         s3_path = f"s3://{bucket_name}/{file_key}"
         logging.info(f"Despesas salvas em: {s3_path}")
