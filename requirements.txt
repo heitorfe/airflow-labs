@@ -24,3 +24,5 @@ astro-sdk-python
 openpyxl
 beautifulsoup4
 pendulum
+
+deltalake
